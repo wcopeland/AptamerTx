@@ -4,7 +4,6 @@ import scipy as sp
 import matplotlib.pyplot as mplot
 import roadrunner as rr
 
-
 from bokeh import client as bkclient
 from bokeh import io as bkio
 from bokeh import plotting as bkplot
@@ -50,7 +49,7 @@ for key in mga5s:
 
     # Infer the time window where the plate was removed and samples were induced.
     delta_time = np.diff(df['Time [s]'])
-    first_index_after_induction = next((i for (i,x) in enumerate(delta_time[1:]) if x != delta_time[0])) + 2
+    first_index_after_induction = next((i for (i, x) in enumerate(delta_time[1:]) if x != delta_time[0])) + 2
     first_time_after_induction = df['Time [s]'].iloc[first_index_after_induction]
 
     # Create long-form DataFrame
@@ -80,7 +79,6 @@ for key in mga5s:
 composite = pd.merge(composite, combined_meta, on='Well')
 
 
-
 """-------------------------------------------------------------------------------------------
     In dynamic measurements we observe a gradual decline in fluorescence intensity for
     long exposure times. We hypothesize that this decrease in signal is an artifact of
@@ -103,7 +101,7 @@ plot_figure = bkplot.figure(title='MGA5S Fluorescence Induction Experiment',
                             tools='pan,box_zoom,box_select,reset')
 
 colors_map = dict(zip(composite['Strain'].unique(), ['blue', 'red', 'green', 'purple', 'orange', 'brown', 'grey']))
-plot_source.data['color'] = [colors_map[x] for x in plot_source.data['Strain']]
+plot_source.add([colors_map[x] for x in plot_source.data['Strain']], name='color')
 
 plot_figure.scatter(x='Time [s]', y='MGA5S FL', source=plot_source, fill_color='color', line_color='black',
                     fill_alpha=0.5, line_alpha=0.8, size=6)
@@ -117,47 +115,122 @@ bkplot.show(layout)
     Establish the parameters that will be used during the optimization routine.
 -------------------------------------------------------------------------------------------"""
 
-# Initiate the parameter matrix along with the shared parameters
+
 shared_opt_params = []
-opt_param_sharing_map = {'kf': '*',
-                         'kr': '*',
-                         'kt': '*',
-                         'syn': 'Strain',
-                         'ci': 'External Dye [uM]'
-                         }
+shared_opt_log_range = []
 
-param_matrix = pd.DataFrame(index=combined_meta['Well'], columns=opt_param_sharing_map.keys())
+opt_param_sharing_map = {
+    'kf': '*',
+    'kr': '*',
+    'kt': '*',
+    'syn': 'Strain',
+    'ci': 'External Dye [uM]'
+}
 
+param_ranges = {
+    'kf': (1e-9, 1e1),
+    'kr': (1e-9, 1e1),
+    'kt': (1e-9, 1e1),
+    'syn': (1e-5, 1.),
+    'ci': (1, 1e4)
+}
 
+# Create shared parameter matrix.
+# Initiate the parameter matrix along with the shared parameters
+well_param_frame = pd.DataFrame(index=combined_meta['Well'], columns=opt_param_sharing_map.keys())
 
-for key in param_matrix:
+for key in well_param_frame:
     share_by = opt_param_sharing_map[key]
     if share_by == '*':
-        param_matrix.loc[:, key] = '{{{{{}}}}}'.format(len(shared_opt_params))
+        well_param_frame.loc[:, key] = '{{{{{}}}}}'.format(len(shared_opt_params))
         shared_opt_params.append(0.)
+        shared_opt_log_range.append(param_ranges[key])
     else:
         share_by_factors = combined_meta[share_by].unique()
         for factor in share_by_factors:
             shared_wells = combined_meta.loc[combined_meta[share_by] == factor, 'Well'].values
-            param_matrix.loc[shared_wells, key] = '{{{{{}}}}}'.format(len(shared_opt_params))
+            well_param_frame.loc[shared_wells, key] = '{{{{{}}}}}'.format(len(shared_opt_params))
             shared_opt_params.append(0.)
+            shared_opt_log_range.append(param_ranges[key])
+
+# Convert parameter vector for optimization into a NumPy array.
+shared_opt_params = np.asarray(shared_opt_params, dtype=float)
+shared_opt_log_range = np.asarray(np.log10(shared_opt_log_range), dtype=float)
 
 # Add fixed parameters
-param_matrix['deg_rna'] = 0.
-param_matrix['deg_bound'] = 0.
+well_param_frame['deg_rna'] = 0.
+well_param_frame['deg_bound'] = 0.
 
 renamed_columns = {'External Dye [uM]':'dye_ext',
                   'Dilution Rate (1/hr)': 'dil'}
 dil_dye_ext = composite.groupby('Well').first().rename(columns=renamed_columns).loc[:, renamed_columns.values()]
-param_matrix = pd.merge(param_matrix, dil_dye_ext, left_index=True, right_index=True)
+well_param_frame = pd.merge(well_param_frame, dil_dye_ext, left_index=True, right_index=True)
+
+# Need a model for each set of experimental conditions.
+# In our experiments, we vary the promoter (strain), dilution rate, and external dye
+# concentration. The total number of unique experimental conditions can be captured by finding
+# unique combinations of the "Sample" and "External Dye [uM]" in the metadata.
+
+unique_experiments = combined_meta.groupby(['Sample', 'External Dye [uM]'])['Well'].unique().reset_index()
+model_name_map = {x:'model_{}'.format(i) for (i,x) in enumerate(unique_experiments.index)}
+unique_experiments.rename(index=model_name_map, inplace=True)
+
+# Add model information to metadata by mapping to unique wells.
+well_model_map = {}
+for k,v in unique_experiments['Well'].iteritems():
+    for well in v:
+        well_model_map.update({well: k})
+
+combined_meta['Model'] = combined_meta['Well'].map(well_model_map)
+composite['Model'] = composite['Well'].map(well_model_map)
+
+# Create a mapping of models and parameter values.
+model_param_frame = well_param_frame.rename(index=well_model_map).groupby(level=0).first()
 
 
 """-------------------------------------------------------------------------------------------
-    Build requisite models.
+    Build and simulate SBML models.
 -------------------------------------------------------------------------------------------"""
 
-sample_dyeext_well_map = dict(combined_meta.groupby(['Sample', 'External Dye [uM]'])['Well'].unique())
-num_models = len(sample_dyeext_well_map)
+# Load the SBML model.
+general_model = rr.RoadRunner('mga5s_model.sbml')
+
+# Initialize parameter vector for optimization
+# We must convert range from log scale back to linear scale.
+# noinspection PyRedeclaration
+shared_opt_params = np.power(10., [np.random.uniform(low, high) for (low,high) in shared_opt_log_range])
+
+# Iteratively generate simulation results for each model.
+# for key in model_param_frame.index:
+key = model_param_frame.index[0]
+
+# Parameterize the model
+for param_id, param_value in model_param_frame.loc[key, :].iteritems():
+    if isinstance(param_value, (str, unicode)):
+        value_idx = int(param_value.replace('{', '').replace('}', ''))
+        general_model.setValue(param_id, shared_opt_params[value_idx])
+    else:
+        general_model.setValue(param_id, param_value)
+
+# Initialize species concentrations
+general_model.setValue('rna', 0.)
+general_model.setValue('dye', 0.)
+general_model.setValue('bound', 0.)
+general_model.setValue('dye_ext', 0.)
+
+# Solve for steady state concentrations prior to malachite green induction.
+general_model.steadyState()
+
+# Modify external dye concentration to match the amount of malachite green that is pulsed into the well.
+general_model.setValue('dye_ext', model_param_frame.loc[key, 'dye_ext'])
+
+# Simulate the transient concentration of dye-bound rna (ie. bound) after malachite green exposure.
+sim_result = general_model.simulate(MIN_TIME, MAX_TIME, int(MAX_TIME+1), selections=['time', 'bound'])
+sim_result = pd.DataFrame(sim_result, columns=sim_result.colnames)
+
+# Get approximate FL value.
+sim_result['FL'] = sim_result['bound'] * general_model.getValue('ci')
+
 
 
 
