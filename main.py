@@ -88,7 +88,10 @@ composite = pd.merge(composite, combined_meta, on='Well')
     values recorded in the range t=[0,240]
 -------------------------------------------------------------------------------------------"""
 
-composite = composite.loc[(composite['Time [s]'] >= 0.) & (composite['Time [s]'] <= 240.), :]
+MIN_TIME = 0.
+MAX_TIME = 240.
+
+composite = composite.loc[(composite['Time [s]'] >= MIN_TIME) & (composite['Time [s]'] <= MAX_TIME), :]
 
 
 """-------------------------------------------------------------------------------------------
@@ -110,11 +113,51 @@ bkplot.output_file('mga5s_plot.html')
 bkplot.show(layout)
 
 
+"""-------------------------------------------------------------------------------------------
+    Establish the parameters that will be used during the optimization routine.
+-------------------------------------------------------------------------------------------"""
+
+# Initiate the parameter matrix along with the shared parameters
+shared_opt_params = []
+opt_param_sharing_map = {'kf': '*',
+                         'kr': '*',
+                         'kt': '*',
+                         'syn': 'Strain',
+                         'ci': 'External Dye [uM]'
+                         }
+
+param_matrix = pd.DataFrame(index=combined_meta['Well'], columns=opt_param_sharing_map.keys())
 
 
 
+for key in param_matrix:
+    share_by = opt_param_sharing_map[key]
+    if share_by == '*':
+        param_matrix.loc[:, key] = '{{{{{}}}}}'.format(len(shared_opt_params))
+        shared_opt_params.append(0.)
+    else:
+        share_by_factors = combined_meta[share_by].unique()
+        for factor in share_by_factors:
+            shared_wells = combined_meta.loc[combined_meta[share_by] == factor, 'Well'].values
+            param_matrix.loc[shared_wells, key] = '{{{{{}}}}}'.format(len(shared_opt_params))
+            shared_opt_params.append(0.)
+
+# Add fixed parameters
+param_matrix['deg_rna'] = 0.
+param_matrix['deg_bound'] = 0.
+
+renamed_columns = {'External Dye [uM]':'dye_ext',
+                  'Dilution Rate (1/hr)': 'dil'}
+dil_dye_ext = composite.groupby('Well').first().rename(columns=renamed_columns).loc[:, renamed_columns.values()]
+param_matrix = pd.merge(param_matrix, dil_dye_ext, left_index=True, right_index=True)
 
 
+"""-------------------------------------------------------------------------------------------
+    Build requisite models.
+-------------------------------------------------------------------------------------------"""
+
+sample_dyeext_well_map = dict(combined_meta.groupby(['Sample', 'External Dye [uM]'])['Well'].unique())
+num_models = len(sample_dyeext_well_map)
 
 
 
