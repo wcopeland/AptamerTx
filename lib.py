@@ -218,7 +218,9 @@ class Optimization(object):
         C = self.population[selected_parents[:, 2]]
 
         # Create a new set of vectors based on a combination of 3 randomly selected vectors.
-        N = A + self.F * (B - C)
+        # N = A + self.F * (B - C)
+        N_log = np.log10(A) + self.F * (np.log10(B) - np.log10(C))
+        N = 10. ** N_log
 
         # Create a mask for crossover events. Note that a value of 1 in the crossover matrix will
         # signify using the value from N and a value of 0 in the crossover matrix will signify
