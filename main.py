@@ -1,14 +1,63 @@
 import numpy as np
 import pandas as pd
 import scipy as sp
-import matplotlib.pyplot as mplot
 import roadrunner as rr
-
+from datetime import datetime
 from bokeh import client as bkclient
 from bokeh import io as bkio
 from bokeh import plotting as bkplot
 from bokeh import models as bkmodels
 from bokeh.models import widgets
+from seaborn import cubehelix_palette
+
+from lib import Optimization
+
+rr.Config.setValue(rr.Config.ROADRUNNER_DISABLE_WARNINGS, True)
+
+
+# """-------------------------------------------------------------------------------------------
+#     Function definitions
+# -------------------------------------------------------------------------------------------"""
+#
+# def update_dependent_parameters(parameter_vector, _relation_frame):
+#     for i in _relation_frame.index:
+#         target_idx = int(_relation_frame.loc[i, 'target'].replace('{', '').replace('}', ''))
+#
+#         # Get the first operand.
+#         if isinstance(_relation_frame.loc[i, 'operand_1_min'], (str, unicode)):
+#             min_1 = parameter_vector[int(_relation_frame.loc[i, 'operand_1_min'].replace('{', '').replace('}', ''))]
+#         else:
+#             min_1 = _relation_frame.loc[i, 'operand_1_min']
+#
+#         if isinstance(_relation_frame.loc[i, 'operand_1_max'], (str, unicode)):
+#             max_1 = parameter_vector[int(_relation_frame.loc[i, 'operand_1_max'].replace('{', '').replace('}', ''))]
+#         else:
+#             max_1 = _relation_frame.loc[i, 'operand_1_max']
+#
+#         if min_1 == max_1:
+#             op_1 = min_1
+#         else:
+#             op_1 = 10. ** np.random.uniform(np.log10(min_1), np.log10(max_1))
+#
+#         # Get the second operand.
+#         if isinstance(_relation_frame.loc[i, 'operand_2_min'], (str, unicode)):
+#             min_2 = parameter_vector[int(_relation_frame.loc[i, 'operand_2_min'].replace('{', '').replace('}', ''))]
+#         else:
+#             min_2 = _relation_frame.loc[i, 'operand_2_min']
+#
+#         if isinstance(_relation_frame.loc[i, 'operand_2_max'], (str, unicode)):
+#             max_2 = parameter_vector[int(_relation_frame.loc[i, 'operand_2_max'].replace('{', '').replace('}', ''))]
+#         else:
+#             max_2 = _relation_frame.loc[i, 'operand_2_max']
+#
+#         if min_2 == max_2:
+#             op_2 = min_2
+#         else:
+#             op_2 = 10. ** np.random.uniform(np.log10(min_2), np.log10(max_2))
+#
+#         # Update the value
+#         parameter_vector[target_idx] = _relation_frame.loc[i, 'operator'](op_1, op_2)
+#     return
 
 
 """-------------------------------------------------------------------------------------------
@@ -91,6 +140,9 @@ MAX_TIME = 240.
 
 composite = composite.loc[(composite['Time [s]'] >= MIN_TIME) & (composite['Time [s]'] <= MAX_TIME), :]
 
+# Round time to the nearest second. This is still sufficient
+composite['Time [s]'] = composite['Time [s]'].round(0)
+
 
 """-------------------------------------------------------------------------------------------
     Visualize Data
@@ -100,11 +152,12 @@ plot_source = bkmodels.ColumnDataSource(composite)
 plot_figure = bkplot.figure(title='MGA5S Fluorescence Induction Experiment',
                             tools='pan,box_zoom,box_select,reset')
 
-colors_map = dict(zip(composite['Strain'].unique(), ['blue', 'red', 'green', 'purple', 'orange', 'brown', 'grey']))
+# colors_map = dict(zip(composite['Strain'].unique(), ['blue', 'red', 'green', 'purple', 'orange', 'brown', 'grey']))
+colors_map = dict(zip(composite['Strain'].unique(), cubehelix_palette(composite['Strain'].unique().shape[0]).as_hex()))
 plot_source.add([colors_map[x] for x in plot_source.data['Strain']], name='color')
 
 plot_figure.scatter(x='Time [s]', y='MGA5S FL', source=plot_source, fill_color='color', line_color='black',
-                    fill_alpha=0.5, line_alpha=0.8, size=6)
+                    fill_alpha=0.6, line_alpha=0.8, size=6)
 
 layout = bkplot.hplot(plot_figure)
 bkplot.output_file('mga5s_plot.html')
@@ -114,7 +167,6 @@ bkplot.show(layout)
 """-------------------------------------------------------------------------------------------
     Establish the parameters that will be used during the optimization routine.
 -------------------------------------------------------------------------------------------"""
-
 
 shared_opt_params = []
 shared_opt_log_range = []
@@ -187,6 +239,110 @@ composite['Model'] = composite['Well'].map(well_model_map)
 # Create a mapping of models and parameter values.
 model_param_frame = well_param_frame.rename(index=well_model_map).groupby(level=0).first()
 
+"""-------------------------------------------------------------------------------------------
+    Establish the dependent relationships between parameters. This is a critical step
+    to further constrain the solution space.
+-------------------------------------------------------------------------------------------"""
+
+# Create a DataFrame that describes relationships between parameters.
+param_relations = {
+    ('syn', 'Strain', 'J23100'): [np.multiply, (1.2, 1.5), ('syn', 'Strain', 'J23101')],
+    ('syn', 'Strain', 'J23104'): [np.multiply, (2.0, 2.5), ('syn', 'Strain', 'J23101')],
+    ('syn', 'Strain', 'J23107'): [np.multiply, (0.2, 0.5), ('syn', 'Strain', 'J23101')],
+    ('syn', 'Strain', 'J23110'): [np.multiply, (0.6, 0.8), ('syn', 'Strain', 'J23101')],
+    ('syn', 'Strain', 'J23111'): [np.multiply, (2.2, 2.8), ('syn', 'Strain', 'J23101')],
+    ('kr', 'Strain', 'J23100'): [np.multiply, (8.0e-8, 5.0e-7), ('kf', 'Strain', 'J23100')],
+    ('kr', 'Strain', 'J23101'): [np.multiply, (8.0e-8, 5.0e-7), ('kf', 'Strain', 'J23101')],
+    ('kr', 'Strain', 'J23104'): [np.multiply, (8.0e-8, 5.0e-7), ('kf', 'Strain', 'J23104')],
+    ('kr', 'Strain', 'J23107'): [np.multiply, (8.0e-8, 5.0e-7), ('kf', 'Strain', 'J23107')],
+    ('kr', 'Strain', 'J23110'): [np.multiply, (8.0e-8, 5.0e-7), ('kf', 'Strain', 'J23110')],
+    ('kr', 'Strain', 'J23111'): [np.multiply, (8.0e-8, 5.0e-7), ('kf', 'Strain', 'J23111')],
+}
+
+relation_frame = pd.DataFrame(index=range(len(param_relations)),
+    columns=['target',
+             'operator',
+             'operand_1_min',
+             'operand_1_max',
+             'operand_2_min',
+             'operand_2_max']
+)
+
+def get_parameter_from_relation(relation):
+    param_key, meta_key, meta_value = relation
+    target_wells = combined_meta.loc[combined_meta[meta_key] == meta_value, 'Well'].values
+    replacement_param_idx = well_param_frame.loc[target_wells, param_key].unique()
+
+    if len(replacement_param_idx) < 1:
+        msg = 'Found no parameter for replacement in the relation: {}'.format(relation)
+        raise ValueError(msg)
+    elif len(replacement_param_idx) == 1:
+        return replacement_param_idx[0]
+    else:
+        msg = 'Found too many parameters for replacement. Relationship must be more specific: {}'.format(relation)
+        raise ValueError(msg)
+
+# Iteratively populate the parameter relationship DataFrame.
+for i, relationship in enumerate(param_relations.items()):
+    new_relationship = dict()
+    new_relationship['target'] = get_parameter_from_relation(relationship[0])
+
+    operator, operand_1, operand_2 = relationship[1]
+    new_relationship['operator'] = operator
+
+    if isinstance(operand_1, (tuple, list)):
+        if len(operand_1) == 3:
+            param_idx = get_parameter_from_relation(operand_1)
+            new_relationship['operand_1_min'] = param_idx
+            new_relationship['operand_1_max'] = param_idx
+        elif len(operand_1) == 2:
+            new_relationship['operand_1_min'] = operand_1[0]
+            new_relationship['operand_1_max'] = operand_1[1]
+        else:
+            msg = 'Cannot interpret operand: {}'.format(operand_1)
+            raise ValueError(msg)
+    else:
+        new_relationship['operand_1_min'] = operand_1
+        new_relationship['operand_1_max'] = operand_1
+
+    if isinstance(operand_2, (tuple, list)):
+        if len(operand_2) == 3:
+            param_idx = get_parameter_from_relation(operand_2)
+            new_relationship['operand_2_min'] = param_idx
+            new_relationship['operand_2_max'] = param_idx
+        elif len(operand_2) == 2:
+            new_relationship['operand_2_min'] = operand_2[0]
+            new_relationship['operand_2_max'] = operand_2[1]
+        else:
+            msg = 'Cannot interpret operand: {}'.format(operand_2)
+            raise ValueError(msg)
+    else:
+        new_relationship['operand_2_min'] = operand_2
+        new_relationship['operand_2_max'] = operand_2
+
+    relation_frame.iloc[i, :] = new_relationship
+
+# Clean up the relation frame to avoid duplicates.
+relation_frame = relation_frame.drop_duplicates()
+relation_frame.rename(index=dict(zip(relation_frame.index, range(relation_frame.shape[0]))), inplace=True)
+
+
+"""-------------------------------------------------------------------------------------------
+    Summarize the parameter space.
+-------------------------------------------------------------------------------------------"""
+
+num_parameters = len(shared_opt_params)
+num_dependent_parameters = len(relation_frame['target'].unique())
+num_independent_parameters = num_parameters - num_dependent_parameters
+
+print('-------------------------------------------')
+print('\tMODEL SUMMARY')
+print('-------------------------------------------')
+print('Total number of parameters to be optimized:\t{}'.format(num_parameters))
+print('Total number of independent parameters:\t{}'.format(num_independent_parameters))
+print('Total number of dependent parameters:\t{}'.format(num_dependent_parameters))
+print('Total number of models:\t{}\n\n'.format(model_param_frame.shape[0]))
+
 
 """-------------------------------------------------------------------------------------------
     Build and simulate SBML models.
@@ -195,43 +351,19 @@ model_param_frame = well_param_frame.rename(index=well_model_map).groupby(level=
 # Load the SBML model.
 general_model = rr.RoadRunner('mga5s_model.sbml')
 
-# Initialize parameter vector for optimization
-# We must convert range from log scale back to linear scale.
-# noinspection PyRedeclaration
-shared_opt_params = np.power(10., [np.random.uniform(low, high) for (low,high) in shared_opt_log_range])
 
-# Iteratively generate simulation results for each model.
-# for key in model_param_frame.index:
-key = model_param_frame.index[0]
-
-# Parameterize the model
-for param_id, param_value in model_param_frame.loc[key, :].iteritems():
-    if isinstance(param_value, (str, unicode)):
-        value_idx = int(param_value.replace('{', '').replace('}', ''))
-        general_model.setValue(param_id, shared_opt_params[value_idx])
-    else:
-        general_model.setValue(param_id, param_value)
-
-# Initialize species concentrations
-general_model.setValue('rna', 0.)
-general_model.setValue('dye', 0.)
-general_model.setValue('bound', 0.)
-general_model.setValue('dye_ext', 0.)
-
-# Solve for steady state concentrations prior to malachite green induction.
-general_model.steadyState()
-
-# Modify external dye concentration to match the amount of malachite green that is pulsed into the well.
-general_model.setValue('dye_ext', model_param_frame.loc[key, 'dye_ext'])
-
-# Simulate the transient concentration of dye-bound rna (ie. bound) after malachite green exposure.
-sim_result = general_model.simulate(MIN_TIME, MAX_TIME, int(MAX_TIME+1), selections=['time', 'bound'])
-sim_result = pd.DataFrame(sim_result, columns=sim_result.colnames)
-
-# Get approximate FL value.
-sim_result['FL'] = sim_result['bound'] * general_model.getValue('ci')
-
-
-
+start_time = datetime.now()
+opt = Optimization(
+    model=general_model,
+    observed=composite[['Time [s]', 'Model', 'MGA5S FL']],
+    relation_frame=relation_frame,
+    model_param_frame=model_param_frame,
+    param_range= shared_opt_log_range,
+    t_0=MIN_TIME,
+    t_max=MAX_TIME
+)
+print(opt.run())
+end_time = datetime.now()
 
 print('Done!')
+print('Simulation Time: {}'.format(end_time - start_time))
