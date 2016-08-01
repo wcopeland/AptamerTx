@@ -369,7 +369,7 @@ opt = Optimization(
     param_range= shared_opt_log_range,
     t_0=MIN_TIME,
     t_max=MAX_TIME,
-    max_generations=40
+    max_generations=500
 )
 print(opt.run())
 end_time = datetime.now()
