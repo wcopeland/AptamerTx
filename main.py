@@ -8,6 +8,7 @@ from bokeh import io as bkio
 from bokeh import plotting as bkplot
 from bokeh import models as bkmodels
 from bokeh.models import widgets
+from bokeh import palettes as bkpal
 from seaborn import cubehelix_palette
 
 from lib import Optimization
@@ -145,15 +146,17 @@ composite['Time [s]'] = composite['Time [s]'].round(0)
 
 
 """-------------------------------------------------------------------------------------------
-    Visualize Data
+    Visualize Data:
+    Dynamic FL measurements
 -------------------------------------------------------------------------------------------"""
 
 plot_source = bkmodels.ColumnDataSource(composite)
 plot_figure = bkplot.figure(title='MGA5S Fluorescence Induction Experiment',
                             tools='pan,box_zoom,box_select,reset')
 
-# colors_map = dict(zip(composite['Strain'].unique(), ['blue', 'red', 'green', 'purple', 'orange', 'brown', 'grey']))
-colors_map = dict(zip(composite['Strain'].unique(), cubehelix_palette(composite['Strain'].unique().shape[0]).as_hex()))
+all_strains = composite['Strain'].unique()
+required_colors = (bkpal.Paired12 * int(np.ceil(len(all_strains)/12.)))[:len(all_strains)]
+colors_map = dict(zip(all_strains, required_colors))
 plot_source.add([colors_map[x] for x in plot_source.data['Strain']], name='color')
 
 plot_figure.scatter(x='Time [s]', y='MGA5S FL', source=plot_source, fill_color='color', line_color='black',
@@ -238,6 +241,7 @@ composite['Model'] = composite['Well'].map(well_model_map)
 
 # Create a mapping of models and parameter values.
 model_param_frame = well_param_frame.rename(index=well_model_map).groupby(level=0).first()
+model_param_frame.index.name = 'Model'
 
 """-------------------------------------------------------------------------------------------
     Establish the dependent relationships between parameters. This is a critical step
@@ -345,12 +349,16 @@ print('Total number of models:\t{}\n\n'.format(model_param_frame.shape[0]))
 
 
 """-------------------------------------------------------------------------------------------
-    Build and simulate SBML models.
+    Build SBML models.
 -------------------------------------------------------------------------------------------"""
 
 # Load the SBML model.
 general_model = rr.RoadRunner('mga5s_model.sbml')
 
+
+"""-------------------------------------------------------------------------------------------
+    Parameterize the model using Differential Evolution.
+-------------------------------------------------------------------------------------------"""
 
 start_time = datetime.now()
 opt = Optimization(
@@ -360,10 +368,59 @@ opt = Optimization(
     model_param_frame=model_param_frame,
     param_range= shared_opt_log_range,
     t_0=MIN_TIME,
-    t_max=MAX_TIME
+    t_max=MAX_TIME,
+    max_generations=10
 )
 print(opt.run())
 end_time = datetime.now()
 
-print('Done!')
+print('-----------------------------')
+print('\tSimulation Results')
+print('-----------------------------\n')
+
+best_idx = opt.fitness.argmin()
+best_score = opt.fitness[best_idx]
+best_parameters = opt.population[best_idx]
+
+print('Best Score: {}'.format(best_score))
+print('Best Parameters: \t{}'.format(best_parameters))
 print('Simulation Time: {}'.format(end_time - start_time))
+
+
+"""-------------------------------------------------------------------------------------------
+    Visualize Data
+-------------------------------------------------------------------------------------------"""
+
+plot_source = bkmodels.ColumnDataSource(composite)
+plot_figure = bkplot.figure(title='MGA5S Fluorescence Induction Experiment',
+                            tools='pan,box_zoom,box_select,reset')
+
+all_models = composite['Model'].unique()
+required_colors = (bkpal.Paired12 * int(np.ceil(len(all_models)/12.)))[:len(all_models)]
+colors_map = dict(zip(all_models, required_colors))
+plot_source.add([colors_map[x] for x in plot_source.data['Model']], name='color')
+
+# Plot the simulated values.
+simulated_fl = opt.simulate_model(best_parameters)
+for model_name in all_models:
+    model_fl = simulated_fl[simulated_fl['Model'] == model_name].sort_values('Time [s]')
+    plot_figure.line(
+        x=model_fl['Time [s]'],
+        y=model_fl['Simulated FL'],
+        color=colors_map[model_name],
+        line_width=2
+    )
+
+# Plot the observed values.
+plot_figure.scatter(x='Time [s]', y='MGA5S FL', source=plot_source, fill_color='color', line_color='black',
+                    fill_alpha=0.6, line_alpha=0.8, size=6)
+
+
+layout = bkplot.hplot(plot_figure)
+bkplot.output_file('mga5s_plot.html')
+bkplot.show(layout)
+
+
+
+print('Done!')
+

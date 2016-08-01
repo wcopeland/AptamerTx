@@ -26,6 +26,7 @@ class Optimization(object):
 
         # Initialize population and evaluate initial fitness
         self.initialize_random_population()
+        self.population = np.apply_along_axis(self.verify_dependent_parameters, 1, self.population)
         self.fitness = self.get_fitness(chunk=np.arange(population_size), verbose=True)
         return
 
@@ -37,6 +38,11 @@ class Optimization(object):
         return
 
     def verify_dependent_parameters(self, vector, verbose=False):
+        '''
+        :param vector:
+        :param verbose:
+        @rtype: np.ndarray
+        '''
         changes = []
         for i in self.relation_frame.index:
             target_idx = int(self.relation_frame.loc[i, 'target'].replace('{', '').replace('}', ''))
@@ -81,7 +87,7 @@ class Optimization(object):
 
         if verbose:
             print(changes)
-        return
+        return vector
 
     def run(self, num_cpus=1):
 
@@ -107,8 +113,54 @@ class Optimization(object):
         return
 
     def evolve_generation(self, chunk):
+        # Generate random seed within the function. This helps multi CPU runs avoid
+        # choosing the same random values.
+        np.random.seed()
+
         self.create_challengers(chunk)
         return
+
+    def simulate_model(self, parameter_vector):
+        # Iteratively generate simulation results for each model.
+        simulation_results = pd.DataFrame(columns=['Time [s]', 'Model', 'Simulated FL'])
+        for model_name in self.model_param_frame.index:
+
+            # Parameterize the model: Draw values from shared parameter vector.
+            for param_id, param_value in self.model_param_frame.loc[model_name, :].iteritems():
+                if isinstance(param_value, (str, unicode)):
+                    value_idx = int(param_value.replace('{', '').replace('}', ''))
+                    self.model.setValue(param_id, parameter_vector[value_idx])
+                else:
+                    self.model.setValue(param_id, param_value)
+
+            # Initialize species concentrations
+            self.model.setValue('rna', 0.)
+            self.model.setValue('dye', 0.)
+            self.model.setValue('bound', 0.)
+            self.model.setValue('dye_ext', 0.)
+
+            # Solve for steady state concentrations prior to malachite green induction.
+            self.model.steadyState()
+
+            # Modify external dye concentration to match the amount of malachite green that is pulsed into the well.
+            self.model.setValue('dye_ext', self.model_param_frame.loc[model_name, 'dye_ext'])
+
+            # Simulate the transient concentration of dye-bound rna (ie. bound) after malachite green exposure.
+            model_result = self.model.simulate(self.t_0, self.t_max, int(self.t_max + 1),
+                                               selections=['time', 'bound'])
+            model_result = pd.DataFrame(model_result, columns=['Time [s]', 'bound'])
+
+            # Get approximate FL value.
+            model_result['Simulated FL'] = model_result['bound'] * self.model.getValue('ci')
+
+            # Annotate which model this corresponds to.
+            model_result['Model'] = model_name
+
+            # Add model results to all simulation results.
+            simulation_results = pd.concat(
+                (simulation_results, model_result[['Time [s]', 'Model', 'Simulated FL']]))
+
+        return simulation_results
 
     def get_fitness(self, chunk=None, group=None, verbose=False):
         '''
@@ -129,56 +181,23 @@ class Optimization(object):
         fitness_values = np.ones(shape=group.shape[0])
 
         for i, vector in enumerate(group):
-            # Update shared parameter vector values to account for relationships.
-            self.verify_dependent_parameters(vector, verbose)
-
-            # Iteratively generate simulation results for each model.
-            simulation_results = pd.DataFrame(columns=['Time [s]', 'Model', 'Simulated FL'])
-            for key in self.model_param_frame.index:
-                # Parameterize the model: Draw values from shared parameter vector.
-                for param_id, param_value in self.model_param_frame.loc[key, :].iteritems():
-                    if isinstance(param_value, (str, unicode)):
-                        value_idx = int(param_value.replace('{', '').replace('}', ''))
-                        self.model.setValue(param_id, vector[value_idx])
-                    else:
-                        self.model.setValue(param_id, param_value)
-
-                # Initialize species concentrations
-                self.model.setValue('rna', 0.)
-                self.model.setValue('dye', 0.)
-                self.model.setValue('bound', 0.)
-                self.model.setValue('dye_ext', 0.)
-
-                # Solve for steady state concentrations prior to malachite green induction.
-                self.model.steadyState()
-
-                # Modify external dye concentration to match the amount of malachite green that is pulsed into the well.
-                self.model.setValue('dye_ext', self.model_param_frame.loc[key, 'dye_ext'])
-
-                # Simulate the transient concentration of dye-bound rna (ie. bound) after malachite green exposure.
-                model_result = self.model.simulate(self.t_0, self.t_max, int(self.t_max + 1),
-                                                   selections=['time', 'bound'])
-                model_result = pd.DataFrame(model_result, columns=['Time [s]', 'bound'])
-
-                # Get approximate FL value.
-                model_result['Simulated FL'] = model_result['bound'] * self.model.getValue('ci')
-
-                # Annotate which model this corresponds to.
-                model_result['Model'] = key
-
-                # Add model results to all simulation results.
-                simulation_results = pd.concat(
-                    (simulation_results, model_result[['Time [s]', 'Model', 'Simulated FL']]))
+            # Generate simulation results for each model and store in a single DataFrame.
+            simulation_results = self.simulate_model(vector)
 
             # Merged simulated and observed data.
             obs_exp_frame = pd.merge(simulation_results, self.observed, on=['Time [s]', 'Model'])
 
             # chi_squared = np.power((obs_exp_frame['MGA5S FL'] - obs_exp_frame['Simulated FL']), 2.0) / obs_exp_frame['Simulated FL']
             diff_squared = np.power((obs_exp_frame['MGA5S FL'] - obs_exp_frame['Simulated FL']), 2.0)
-            sum_diff_squared = diff_squared.sum()
+
+            # Get weights
+            weights = obs_exp_frame['Time [s]'].apply(lambda o: np.power(1. - o / 240., 0.4))
+
+            # Sum of weighted differences between observed and expected.
+            sum_weighted_diff_squared = (diff_squared *weights).sum()
 
             # Update fitness values.
-            fitness_values[i] = sum_diff_squared
+            fitness_values[i] = sum_weighted_diff_squared
         return fitness_values
 
     def create_challengers(self, chunk):
@@ -218,11 +237,12 @@ class Optimization(object):
         T = CRM * N + np.abs(CRM - 1) * O
 
         # Store the vector and fitness for new members.
-        # Note: The get_fitness() functions checks if all parameter values are within the specified
+        # Note: It is important to check if all parameter values are within the specified
         # range. If they are not, they will be randomly reassigned within the fitness function.
         assert isinstance(T, np.ndarray)
         self.trial_population[chunk, :] = T
-        self.trial_fitness[chunk] = self.get_fitness(group=T)
+        T = np.apply_along_axis(self.verify_dependent_parameters, 1, T)
 
+        self.trial_fitness[chunk] = self.get_fitness(group=T)
         return
 
