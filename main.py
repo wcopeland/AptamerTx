@@ -150,21 +150,21 @@ composite['Time [s]'] = composite['Time [s]'].round(0)
     Dynamic FL measurements
 -------------------------------------------------------------------------------------------"""
 
-plot_source = bkmodels.ColumnDataSource(composite)
-plot_figure = bkplot.figure(title='MGA5S Fluorescence Induction Experiment',
-                            tools='pan,box_zoom,box_select,reset')
-
-all_strains = composite['Strain'].unique()
-required_colors = (bkpal.Paired12 * int(np.ceil(len(all_strains)/12.)))[:len(all_strains)]
-colors_map = dict(zip(all_strains, required_colors))
-plot_source.add([colors_map[x] for x in plot_source.data['Strain']], name='color')
-
-plot_figure.scatter(x='Time [s]', y='MGA5S FL', source=plot_source, fill_color='color', line_color='black',
-                    fill_alpha=0.6, line_alpha=0.8, size=6)
-
-layout = bkplot.hplot(plot_figure)
-bkplot.output_file('mga5s_plot.html')
-bkplot.show(layout)
+# plot_source = bkmodels.ColumnDataSource(composite)
+# plot_figure = bkplot.figure(title='MGA5S Fluorescence Induction Experiment',
+#                             tools='pan,box_zoom,box_select,reset')
+#
+# all_strains = composite['Strain'].unique()
+# required_colors = (bkpal.Paired12 * int(np.ceil(len(all_strains)/12.)))[:len(all_strains)]
+# colors_map = dict(zip(all_strains, required_colors))
+# plot_source.add([colors_map[x] for x in plot_source.data['Strain']], name='color')
+#
+# plot_figure.scatter(x='Time [s]', y='MGA5S FL', source=plot_source, fill_color='color', line_color='black',
+#                     fill_alpha=0.6, line_alpha=0.8, size=6)
+#
+# layout = bkplot.hplot(plot_figure)
+# bkplot.output_file('mga5s_plot.html')
+# bkplot.show(layout)
 
 
 """-------------------------------------------------------------------------------------------
@@ -369,7 +369,7 @@ opt = Optimization(
     param_range= shared_opt_log_range,
     t_0=MIN_TIME,
     t_max=MAX_TIME,
-    max_generations=10
+    max_generations=40
 )
 print(opt.run())
 end_time = datetime.now()

@@ -116,7 +116,6 @@ class Optimization(object):
         # Generate random seed within the function. This helps multi CPU runs avoid
         # choosing the same random values.
         np.random.seed()
-
         self.create_challengers(chunk)
         return
 
@@ -187,7 +186,7 @@ class Optimization(object):
             # Merged simulated and observed data.
             obs_exp_frame = pd.merge(simulation_results, self.observed, on=['Time [s]', 'Model'])
 
-            # chi_squared = np.power((obs_exp_frame['MGA5S FL'] - obs_exp_frame['Simulated FL']), 2.0) / obs_exp_frame['Simulated FL']
+            # Calculate difference between observed and expected.
             diff_squared = np.power((obs_exp_frame['MGA5S FL'] - obs_exp_frame['Simulated FL']), 2.0)
 
             # Get weights
@@ -236,12 +235,14 @@ class Optimization(object):
         # Create new trial members
         T = CRM * N + np.abs(CRM - 1) * O
 
-        # Store the vector and fitness for new members.
+
         # Note: It is important to check if all parameter values are within the specified
         # range. If they are not, they will be randomly reassigned within the fitness function.
         assert isinstance(T, np.ndarray)
-        self.trial_population[chunk, :] = T
         T = np.apply_along_axis(self.verify_dependent_parameters, 1, T)
+
+        # Store the vector and fitness for new members.
+        self.trial_population[chunk, :] = T
 
         self.trial_fitness[chunk] = self.get_fitness(group=T)
         return
